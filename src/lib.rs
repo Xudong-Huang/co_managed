@@ -129,6 +129,7 @@ mod tests {
 
         coroutine::sleep(Duration::from_millis(100));
         unsafe { j.coroutine().cancel() };
+        j.join().ok();
         println!("parent exit");
         coroutine::sleep(Duration::from_millis(1000));
     }
