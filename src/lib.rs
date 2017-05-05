@@ -2,7 +2,8 @@
 //! this is somelike the scoped coroutine creation, the difference is that we manage the sub
 //! coroutines in a hash map, so that when sub coroutine exit the entry will be removed dynamically
 //! and parent doesn't wait it's children exit
-extern crate coroutine;
+extern crate may;
+use may::coroutine;
 
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
@@ -90,12 +91,12 @@ mod tests {
         }
         for i in 0..10 {
             manager.add(move |_| {
-                let d = Dummy(i);
-                println!("sub started, id = {}", d.0);
-                loop {
-                    coroutine::sleep(Duration::from_millis(10));
-                }
-            });
+                            let d = Dummy(i);
+                            println!("sub started, id = {}", d.0);
+                            loop {
+                                coroutine::sleep(Duration::from_millis(10));
+                            }
+                        });
         }
         coroutine::sleep(Duration::from_millis(100));
         println!("parent started");
@@ -117,12 +118,12 @@ mod tests {
             }
             for i in 0..10 {
                 manager.add(move |_| {
-                    let d = Dummy(i);
-                    println!("sub started, id = {}", d.0);
-                    loop {
-                        coroutine::sleep(Duration::from_millis(10));
-                    }
-                });
+                                let d = Dummy(i);
+                                println!("sub started, id = {}", d.0);
+                                loop {
+                                    coroutine::sleep(Duration::from_millis(10));
+                                }
+                            });
             }
             coroutine::park();
         });
