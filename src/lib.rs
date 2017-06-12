@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // a better solution would be use a lock free hashmap
 type CoMap = Arc<Mutex<HashMap<usize, coroutine::JoinHandle<()>>>>;
 
+#[derive(Debug)]
 pub struct Manager {
     id: AtomicUsize,
     co_map: CoMap,
