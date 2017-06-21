@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // a better solution would be use a lock free hashmap
 type CoMap = Arc<Mutex<HashMap<usize, coroutine::JoinHandle<()>>>>;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Manager {
     id: AtomicUsize,
     co_map: CoMap,
@@ -29,7 +29,8 @@ impl Manager {
     }
 
     pub fn add<F>(&self, f: F)
-        where F: FnOnce(SubCo) + Send + 'static
+    where
+        F: FnOnce(SubCo) + Send + 'static,
     {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let sub = SubCo {
@@ -38,6 +39,39 @@ impl Manager {
         };
 
         let co = coroutine::spawn(move || f(sub));
+
+        // it doesnt' matter if the co is already done here
+        // this will just leave any entry in the map and eventually
+        // will be droped after all coroutines done
+        let mut map = self.co_map.lock().unwrap();
+        map.insert(id, co);
+    }
+
+    pub unsafe fn add_unsafe<'a, F>(&self, f: F)
+    where
+        F: FnOnce(SubCo) + Send + 'a,
+    {
+        trait FnBox {
+            fn call_box(self: Box<Self>, SubCo);
+        }
+
+        impl<F: FnOnce(SubCo)> FnBox for F {
+            #[cfg_attr(feature = "cargo-clippy", allow(boxed_local))]
+            fn call_box(self: Box<Self>, subco: SubCo) {
+                self(subco)
+            }
+        }
+
+        let id = self.id.fetch_add(1, Ordering::Relaxed);
+        let sub = SubCo {
+            id: id,
+            co_map: self.co_map.clone(),
+        };
+
+        let closure: Box<FnBox + Send + 'a> = Box::new(f);
+        let closure: Box<FnBox + Send> = ::std::mem::transmute(closure);
+
+        let co = coroutine::spawn(move || closure.call_box(sub));
 
         // it doesnt' matter if the co is already done here
         // this will just leave any entry in the map and eventually
@@ -92,12 +126,12 @@ mod tests {
         }
         for i in 0..10 {
             manager.add(move |_| {
-                            let d = Dummy(i);
-                            println!("sub started, id = {}", d.0);
-                            loop {
-                                coroutine::sleep(Duration::from_millis(10));
-                            }
-                        });
+                let d = Dummy(i);
+                println!("sub started, id = {}", d.0);
+                loop {
+                    coroutine::sleep(Duration::from_millis(10));
+                }
+            });
         }
         coroutine::sleep(Duration::from_millis(100));
         println!("parent started");
@@ -119,12 +153,12 @@ mod tests {
             }
             for i in 0..10 {
                 manager.add(move |_| {
-                                let d = Dummy(i);
-                                println!("sub started, id = {}", d.0);
-                                loop {
-                                    coroutine::sleep(Duration::from_millis(10));
-                                }
-                            });
+                    let d = Dummy(i);
+                    println!("sub started, id = {}", d.0);
+                    loop {
+                        coroutine::sleep(Duration::from_millis(10));
+                    }
+                });
             }
             coroutine::park();
         });
