@@ -84,10 +84,22 @@ impl Manager {
 impl Drop for Manager {
     // when parent exit would call this drop
     fn drop(&mut self) {
-        let map = self.co_map.lock().unwrap();
         // cancel all the sub coroutines
-        for (_, co) in map.iter() {
+        for (_, co) in self.co_map.lock().unwrap().iter() {
             unsafe { co.coroutine().cancel() };
+        }
+
+        if ::std::thread::panicking() {
+            // if in panick don't join here
+            return;
+        }
+
+        let mut map = self.co_map.lock().unwrap();
+        let co_vec: Vec<_> = map.drain().map(|(_, co)| co).collect();
+        drop(map);
+
+        for co in co_vec {
+            co.join().ok();
         }
     }
 }
@@ -104,8 +116,14 @@ impl Drop for SubCo {
     // if this is called due to a panic then it's not safe
     // to call the coroutine mutex lock to trigger another panic
     fn drop(&mut self) {
-        let mut map = self.co_map.lock().unwrap();
-        map.remove(&self.id);
+        if ::std::thread::panicking() {
+            // if in panick don't join here
+            return;
+        }
+
+        if let Some(co) = self.co_map.lock().unwrap().remove(&self.id) {
+            co.join().ok();
+        }
     }
 }
 
