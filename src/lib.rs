@@ -121,7 +121,9 @@ impl Drop for SubCo {
             return;
         }
 
-        if let Some(co) = self.co_map.lock().unwrap().remove(&self.id) {
+        let mut map = self.co_map.lock().unwrap();
+        if let Some(co) = map.remove(&self.id) {
+            drop(map);
             co.join().ok();
         }
     }
