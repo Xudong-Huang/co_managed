@@ -4,4 +4,4 @@ version = "0.1.0"
 authors = ["Xudong Huang <huangxu008@hotmail.com>"]
 
 [dependencies]
-may = "0.2"
+may = { git = "https://github.com/Xudong-Huang/may"}

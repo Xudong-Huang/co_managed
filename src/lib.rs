@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// we can't use coroutine mutex here because in the cancelled drop
+// TODO: we can't use coroutine mutex here because in the cancelled drop
 // lock the mutex would trigger another Cancel panic
 // a better solution would be use a lock free hashmap
 type CoMap = Arc<Mutex<HashMap<usize, coroutine::JoinHandle<()>>>>;
@@ -42,7 +42,7 @@ impl Manager {
         let co = go!(move || f(sub));
 
         // it doesnt' matter if the co is already done here
-        // this will just leave any entry in the map and eventually
+        // this will just leave an entry in the map and eventually
         // will be droped after all coroutines done
         let mut map = self.co_map.lock().unwrap();
         map.insert(id, co);
@@ -97,10 +97,7 @@ impl Drop for Manager {
         }
 
         let mut map = self.co_map.lock().unwrap();
-        let co_vec: Vec<_> = map.drain().map(|(_, co)| co).collect();
-        drop(map);
-
-        for co in co_vec {
+        for co in map.drain().map(|(_, co)| co) {
             co.join().ok();
         }
     }
@@ -159,7 +156,7 @@ mod tests {
         println!("parent started");
         drop(manager);
         println!("parent exit");
-        coroutine::sleep(Duration::from_millis(1000));
+        // coroutine::sleep(Duration::from_millis(1000));
     }
 
     #[test]
