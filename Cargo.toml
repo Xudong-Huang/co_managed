@@ -1,5 +1,5 @@
 [package]
-name = "comanaged"
+name = "co_managed"
 version = "0.1.0"
 authors = ["Xudong Huang <huangxu008@hotmail.com>"]
 
