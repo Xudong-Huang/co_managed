@@ -2,6 +2,7 @@
 //! this is somelike the scoped coroutine creation, the difference is that we manage the sub
 //! coroutines in a hash map, so that when sub coroutine exit the entry will be removed dynamically
 //! and parent doesn't wait it's children exit
+#[macro_use]
 extern crate may;
 use may::coroutine;
 
@@ -38,7 +39,7 @@ impl Manager {
             co_map: self.co_map.clone(),
         };
 
-        let co = coroutine::spawn(move || f(sub));
+        let co = go!(move || f(sub));
 
         // it doesnt' matter if the co is already done here
         // this will just leave any entry in the map and eventually
@@ -71,7 +72,8 @@ impl Manager {
         let closure: Box<FnBox + Send + 'a> = Box::new(f);
         let closure: Box<FnBox + Send> = ::std::mem::transmute(closure);
 
-        let co = coroutine::spawn(move || closure.call_box(sub));
+        #[allow(unused_unsafe)]
+        let co = go!(move || closure.call_box(sub));
 
         // it doesnt' matter if the co is already done here
         // this will just leave any entry in the map and eventually
@@ -162,7 +164,7 @@ mod tests {
 
     #[test]
     fn coroutine_cancel() {
-        let j = coroutine::spawn(|| {
+        let j = go!(|| {
             println!("parent started");
             let manager = Manager::new();
             struct Dummy(usize);
