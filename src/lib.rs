@@ -1,14 +1,14 @@
 //! create managed sub coroutines. managed sub coroutines will be cancelled when the parent exit
-//! this is somelike the scoped coroutine creation, the difference is that we manage the sub
+//! this is some like the scoped coroutine creation, the difference is that we manage the sub
 //! coroutines in a hash map, so that when sub coroutine exit the entry will be removed dynamically
 //! and parent doesn't wait it's children exit
 #[macro_use]
 extern crate may;
 use may::coroutine;
 
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 // TODO: we can't use coroutine mutex here because in the cancelled drop
 // lock the mutex would trigger another Cancel panic
@@ -35,15 +35,15 @@ impl Manager {
     {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let sub = SubCo {
-            id: id,
+            id,
             co_map: self.co_map.clone(),
         };
 
         let co = go!(move || f(sub));
 
-        // it doesnt' matter if the co is already done here
+        // it does not matter if the co is already done here
         // this will just leave an entry in the map and eventually
-        // will be droped after all coroutines done
+        // will be dropped after all coroutines done
         let mut map = self.co_map.lock().unwrap();
         map.insert(id, co);
     }
@@ -52,32 +52,20 @@ impl Manager {
     where
         F: FnOnce(SubCo) + Send + 'a,
     {
-        trait FnBox {
-            fn call_box(self: Box<Self>, SubCo);
-        }
-
-        impl<F: FnOnce(SubCo)> FnBox for F {
-            #[cfg_attr(feature = "cargo-clippy", allow(boxed_local))]
-            fn call_box(self: Box<Self>, subco: SubCo) {
-                self(subco)
-            }
-        }
-
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let sub = SubCo {
-            id: id,
+            id,
             co_map: self.co_map.clone(),
         };
 
-        let closure: Box<FnBox + Send + 'a> = Box::new(f);
-        let closure: Box<FnBox + Send> = ::std::mem::transmute(closure);
+        let closure: Box<dyn FnOnce(SubCo) + Send + 'a> = Box::new(f);
+        let closure: Box<dyn FnOnce(SubCo) + Send> = ::std::mem::transmute(closure);
 
-        #[allow(unused_unsafe)]
-        let co = go!(move || closure.call_box(sub));
+        let co = go!(move || closure(sub));
 
         // it doesnt' matter if the co is already done here
         // this will just leave any entry in the map and eventually
-        // will be droped after all coroutines done
+        // will be dropped after all coroutines done
         let mut map = self.co_map.lock().unwrap();
         map.insert(id, co);
     }
@@ -92,7 +80,7 @@ impl Drop for Manager {
         }
 
         if ::std::thread::panicking() {
-            // if in panick don't join here
+            // if in panic don't join here
             return;
         }
 
@@ -116,7 +104,7 @@ impl Drop for SubCo {
     // to call the coroutine mutex lock to trigger another panic
     fn drop(&mut self) {
         if ::std::thread::panicking() {
-            // if in panick don't join here
+            // if in panic don't join here
             return;
         }
 
@@ -130,9 +118,9 @@ impl Drop for SubCo {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-    use coroutine;
     use super::*;
+    use coroutine;
+    use std::time::Duration;
 
     #[test]
     fn thread_exit() {
