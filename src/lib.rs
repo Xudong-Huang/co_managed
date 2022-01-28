@@ -48,6 +48,11 @@ impl Manager {
         map.insert(id, co);
     }
 
+    /// add sub coroutine that not static
+    /// 
+    /// # Safety
+    /// 
+    /// the `SubCo` may not live long enough
     pub unsafe fn add_unsafe<'a, F>(&self, f: F)
     where
         F: FnOnce(SubCo) + Send + 'a,
@@ -63,7 +68,7 @@ impl Manager {
 
         let co = go!(move || closure(sub));
 
-        // it doesnt' matter if the co is already done here
+        // it doesn't' matter if the co is already done here
         // this will just leave any entry in the map and eventually
         // will be dropped after all coroutines done
         let mut map = self.co_map.lock().unwrap();
