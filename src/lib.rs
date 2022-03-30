@@ -6,14 +6,15 @@
 extern crate may;
 use may::coroutine;
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use dashmap::DashMap;
 
-// TODO: we can't use coroutine mutex here because in the cancelled drop
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+// CAUTION: we can't use coroutine mutex here because in the cancelled drop
 // lock the mutex would trigger another Cancel panic
 // a better solution would be use a lock free hashmap
-type CoMap = Arc<Mutex<HashMap<usize, coroutine::JoinHandle<()>>>>;
+type CoMap = Arc<DashMap<usize, coroutine::JoinHandle<()>>>;
 
 #[derive(Debug, Default)]
 pub struct Manager {
@@ -25,7 +26,7 @@ impl Manager {
     pub fn new() -> Self {
         Manager {
             id: AtomicUsize::new(0),
-            co_map: Arc::new(Mutex::new(HashMap::new())),
+            co_map: Arc::new(DashMap::new()),
         }
     }
 
@@ -44,14 +45,13 @@ impl Manager {
         // it does not matter if the co is already done here
         // this will just leave an entry in the map and eventually
         // will be dropped after all coroutines done
-        let mut map = self.co_map.lock().unwrap();
-        map.insert(id, co);
+        self.co_map.insert(id, co);
     }
 
     /// add sub coroutine that not static
-    /// 
+    ///
     /// # Safety
-    /// 
+    ///
     /// the `SubCo` may not live long enough
     pub unsafe fn add_unsafe<'a, F>(&self, f: F)
     where
@@ -64,15 +64,14 @@ impl Manager {
         };
 
         let closure: Box<dyn FnOnce(SubCo) + Send + 'a> = Box::new(f);
-        let closure: Box<dyn FnOnce(SubCo) + Send> = ::std::mem::transmute(closure);
+        let closure: Box<dyn FnOnce(SubCo) + Send> = std::mem::transmute(closure);
 
         let co = go!(move || closure(sub));
 
         // it doesn't' matter if the co is already done here
         // this will just leave any entry in the map and eventually
         // will be dropped after all coroutines done
-        let mut map = self.co_map.lock().unwrap();
-        map.insert(id, co);
+        self.co_map.insert(id, co);
     }
 }
 
@@ -80,42 +79,33 @@ impl Drop for Manager {
     // when parent exit would call this drop
     fn drop(&mut self) {
         // cancel all the sub coroutines
-        for (_, co) in self.co_map.lock().unwrap().iter() {
+        self.co_map.iter().for_each(|co| {
             unsafe { co.coroutine().cancel() };
-        }
+        });
 
-        if ::std::thread::panicking() {
-            // if in panic don't join here
-            return;
-        }
-
-        let mut map = self.co_map.lock().unwrap();
-        for co in map.drain().map(|(_, co)| co) {
-            co.join().ok();
+        // the SubCo drop would remove itself from the map
+        // we can't remove SubCo here for:
+        // 1. reduce contention
+        // 2. avoid dashmap dead lock when hold item reference
+        //    while other thread is removing the item
+        while !self.co_map.is_empty() {
+            std::thread::yield_now();
         }
     }
 }
 
+/// represent a managed sub coroutine
 pub struct SubCo {
     id: usize,
     co_map: CoMap,
 }
-
-unsafe impl Send for SubCo {}
 
 impl Drop for SubCo {
     // when the sub coroutine finished will trigger this drop
     // if this is called due to a panic then it's not safe
     // to call the coroutine mutex lock to trigger another panic
     fn drop(&mut self) {
-        if ::std::thread::panicking() {
-            // if in panic don't join here
-            return;
-        }
-
-        let mut map = self.co_map.lock().unwrap();
-        if let Some(co) = map.remove(&self.id) {
-            drop(map);
+        if let Some((_, co)) = self.co_map.remove(&self.id) {
             co.join().ok();
         }
     }
@@ -149,7 +139,6 @@ mod tests {
         println!("parent started");
         drop(manager);
         println!("parent exit");
-        // coroutine::sleep(Duration::from_millis(1000));
     }
 
     #[test]

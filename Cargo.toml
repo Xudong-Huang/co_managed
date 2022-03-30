@@ -6,3 +6,4 @@ authors = ["Xudong Huang <huangxu008@hotmail.com>"]
 
 [dependencies]
 may = "0.3"
+dashmap = "5"
