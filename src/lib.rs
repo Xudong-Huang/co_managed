@@ -6,7 +6,8 @@
 extern crate may;
 use may::coroutine;
 
-use dashmap::DashMap;
+// use dashmap::DashMap as Map;
+use crossbeam_skiplist::SkipMap as Map;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 // CAUTION: we can't use coroutine mutex here because in the cancelled drop
 // lock the mutex would trigger another Cancel panic
 // a better solution would be use a lock free hashmap
-type CoMap = Arc<DashMap<usize, coroutine::JoinHandle<()>>>;
+type CoMap = Arc<Map<usize, coroutine::JoinHandle<()>>>;
 
 #[derive(Debug, Default)]
 pub struct Manager {
@@ -26,7 +27,7 @@ impl Manager {
     pub fn new() -> Self {
         Manager {
             id: AtomicUsize::new(0),
-            co_map: Arc::new(DashMap::new()),
+            co_map: Arc::new(Map::new()),
         }
     }
 
@@ -80,7 +81,7 @@ impl Drop for Manager {
     fn drop(&mut self) {
         // cancel all the sub coroutines
         self.co_map.iter().for_each(|co| {
-            unsafe { co.coroutine().cancel() };
+            unsafe { co.value().coroutine().cancel() };
         });
 
         // the SubCo drop would remove itself from the map
@@ -105,8 +106,8 @@ impl Drop for SubCo {
     // if this is called due to a panic then it's not safe
     // to call the coroutine mutex lock to trigger another panic
     fn drop(&mut self) {
-        if let Some((_, co)) = self.co_map.remove(&self.id) {
-            co.join().ok();
+        if let Some(co) = self.co_map.remove(&self.id) {
+            co.value().wait();
         }
     }
 }
