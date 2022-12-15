@@ -78,10 +78,8 @@ impl Manager {
 impl Drop for Manager {
     // when parent exit would call this drop
     fn drop(&mut self) {
-        println!("drop Manager");
         // cancel all the sub coroutines
         self.co_map.lock().values().for_each(|co| {
-            println!("cancel sub co");
             unsafe { co.coroutine().cancel() };
             // we can't wait the sub coroutine here,
             // because we may be in a Cancel panicking context
