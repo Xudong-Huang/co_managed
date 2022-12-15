@@ -5,16 +5,16 @@
 #[macro_use]
 extern crate may;
 use may::coroutine;
+use parking_lot::Mutex;
 
-use dashmap::DashMap;
-
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // CAUTION: we can't use coroutine mutex here because in the cancelled drop
 // lock the mutex would trigger another Cancel panic
 // a better solution would be use a lock free hashmap
-type CoMap = Arc<DashMap<usize, coroutine::JoinHandle<()>>>;
+type CoMap = Arc<Mutex<BTreeMap<usize, coroutine::JoinHandle<()>>>>;
 
 #[derive(Debug, Default)]
 pub struct Manager {
@@ -26,7 +26,7 @@ impl Manager {
     pub fn new() -> Self {
         Manager {
             id: AtomicUsize::new(0),
-            co_map: Arc::new(DashMap::new()),
+            co_map: Arc::new(Default::default()),
         }
     }
 
@@ -45,7 +45,7 @@ impl Manager {
         // it does not matter if the co is already done here
         // this will just leave an entry in the map and eventually
         // will be dropped after all coroutines done
-        self.co_map.insert(id, co);
+        self.co_map.lock().insert(id, co);
     }
 
     /// add sub coroutine that not static
@@ -71,16 +71,21 @@ impl Manager {
         // it doesn't' matter if the co is already done here
         // this will just leave any entry in the map and eventually
         // will be dropped after all coroutines done
-        self.co_map.insert(id, co);
+        self.co_map.lock().insert(id, co);
     }
 }
 
 impl Drop for Manager {
     // when parent exit would call this drop
     fn drop(&mut self) {
+        println!("drop Manager");
         // cancel all the sub coroutines
-        self.co_map.iter().for_each(|co| {
+        self.co_map.lock().values().for_each(|co| {
+            println!("cancel sub co");
             unsafe { co.coroutine().cancel() };
+            // we can't wait the sub coroutine here,
+            // because we may be in a Cancel panicking context
+            // co.wait()
         });
 
         // the SubCo drop would remove itself from the map
@@ -88,8 +93,10 @@ impl Drop for Manager {
         // 1. reduce contention
         // 2. avoid dashmap dead lock when hold item reference
         //    while other thread is removing the item
-        while !self.co_map.is_empty() {
-            std::thread::yield_now();
+        if !std::thread::panicking() {
+            while !self.co_map.lock().is_empty() {
+                may::coroutine::yield_now();
+            }
         }
     }
 }
@@ -105,7 +112,7 @@ impl Drop for SubCo {
     // if this is called due to a panic then it's not safe
     // to call the coroutine mutex lock to trigger another panic
     fn drop(&mut self) {
-        if let Some((_, co)) = self.co_map.remove(&self.id) {
+        if let Some(co) = self.co_map.lock().remove(&self.id) {
             co.join().ok();
         }
     }

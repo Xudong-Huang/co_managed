@@ -6,4 +6,7 @@ authors = ["Xudong Huang <huangxu008@hotmail.com>"]
 
 [dependencies]
 may = "0.3"
-dashmap = "5"
+parking_lot = "0.12"
+
+[patch.crates-io]
+may = { path = "../may" }
