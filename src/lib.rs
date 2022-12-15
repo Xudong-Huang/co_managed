@@ -95,7 +95,7 @@ impl Drop for Manager {
         //    while other thread is removing the item
         if !std::thread::panicking() {
             while !self.co_map.lock().is_empty() {
-                may::coroutine::yield_now();
+                coroutine::yield_now();
             }
         }
     }
@@ -121,7 +121,6 @@ impl Drop for SubCo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coroutine;
     use std::time::Duration;
 
     #[test]
