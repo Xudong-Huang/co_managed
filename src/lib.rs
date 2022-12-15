@@ -110,7 +110,9 @@ impl Drop for SubCo {
     // if this is called due to a panic then it's not safe
     // to call the coroutine mutex lock to trigger another panic
     fn drop(&mut self) {
-        if let Some(co) = self.co_map.lock().remove(&self.id) {
+        let mut map = self.co_map.lock();
+        if let Some(co) = map.remove(&self.id) {
+            drop(map);
             co.join().ok();
         }
     }
