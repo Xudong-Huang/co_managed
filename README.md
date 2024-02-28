@@ -4,9 +4,9 @@ This lib could create managed sub coroutines.
 
 Managed sub coroutines will be cancelled when their parent exit.  This is something like the scoped coroutine creation, the difference is that we manage the sub coroutines in a hash map, so that when sub coroutine exit the entry will be removed dynamically and parent doesn't wait it's children exit.
 
-
-[![Build Status](https://travis-ci.org/Xudong-Huang/co_managed.svg?branch=master)](https://travis-ci.org/Xudong-Huang/co_managed)
-[![Crate](https://img.shields.io/crates/v/co_managed.svg)](https://crates.io/crates/co_managed)
+[![Build Status](https://github.com/Xudong-Huang/co_managed/workflows/CI/badge.svg)](https://github.com/Xudong-Huang/co_managed/actions?query=workflow%3ACI)
+[![Current Crates.io Version](https://img.shields.io/crates/v/co_managed.svg)](https://crates.io/crates/co_managed)
+[![Document](https://img.shields.io/badge/doc-co_managed-green.svg)](https://docs.rs/co_managed)
 
 ## Usage
 
