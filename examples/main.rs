@@ -1,5 +1,5 @@
-use may::{go, coroutine};
 use co_managed::Manager;
+use may::{coroutine, go};
 use std::time::Duration;
 
 fn main() {
