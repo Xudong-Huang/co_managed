@@ -14,4 +14,4 @@ license = "MIT/Apache-2.0"
 
 [dependencies]
 may = "0.3"
-parking_lot = "0.12"
+congee = "0.3"

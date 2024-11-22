@@ -4,29 +4,139 @@
 //! and parent doesn't wait it's children exit
 #[macro_use]
 extern crate may;
-use may::coroutine;
-use parking_lot::Mutex;
+use congee::Congee;
+use may::coroutine::{self, JoinHandle};
 
-use std::collections::BTreeMap;
+use core::fmt;
+use std::mem::forget;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-// CAUTION: we can't use coroutine mutex here because in the cancelled drop
-// lock the mutex would trigger another Cancel panic
-// a better solution would be use a lock free hashmap
-type CoMap = Arc<Mutex<BTreeMap<usize, coroutine::JoinHandle<()>>>>;
+#[derive(Clone)]
+struct CoHandle {
+    co: Arc<JoinHandle<()>>,
+}
+
+impl From<usize> for CoHandle {
+    /// SAFETY
+    fn from(co: usize) -> Self {
+        CoHandle {
+            co: unsafe { Arc::from_raw(co as *mut _) },
+        }
+    }
+}
+
+impl From<CoHandle> for usize {
+    fn from(co: CoHandle) -> Self {
+        Arc::into_raw(co.co) as usize
+    }
+}
+
+impl CoHandle {
+    fn new(co: JoinHandle<()>) -> Self {
+        CoHandle { co: Arc::new(co) }
+    }
+
+    fn join(self) {
+        let co = Arc::into_inner(self.co).expect("can't get co from Arc");
+        co.join().ok();
+    }
+}
+
+impl CoHandle {}
+/// concurrent map for coroutine
+struct CoMap {
+    map: Congee<usize, CoHandle>,
+}
+
+impl fmt::Debug for CoMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CoMap")
+    }
+}
+
+impl Default for CoMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CoMap {
+    fn new() -> Self {
+        // let allocator = congee::DefaultAllocator {};
+        // let drainer = |id, co: CoHandle| {
+        //     println!("clear co handle, id={}", id);
+        //     unsafe { co.co.coroutine().cancel() };
+        //     // we can't wait the sub coroutine here,
+        //     // because we may be in a Cancel panicking context
+        //     // co.join()
+        // };
+        CoMap {
+            // map: Congee::new_with_drainer(allocator, drainer),
+            map: Congee::default(),
+        }
+    }
+
+    fn insert(&self, id: usize, co: JoinHandle<()>) {
+        let value = CoHandle::new(co);
+        let guard = self.map.pin();
+        self.map.insert(id, value, &guard).unwrap();
+    }
+
+    fn remove(&self, id: &usize) -> Option<CoHandle> {
+        let guard = self.map.pin();
+        self.map.remove(id, &guard)
+    }
+
+    fn is_empty(&self) -> bool {
+        let guard = self.map.pin();
+        self.map.is_empty(&guard)
+    }
+
+    fn cancel_all(&self, max: usize) {
+        const MAX_LEN: usize = 64;
+        let mut ids = [(0, 0); MAX_LEN];
+        let mut end = max;
+        let mut start = end.max(MAX_LEN) - MAX_LEN;
+
+        // we are using a stupid way to iter the map
+        while end > 0 {
+            let guard = self.map.pin();
+            if self.map.is_empty(&guard) {
+                return;
+            }
+
+            let len = self.map.range(&start, &end, &mut ids, &guard);
+            println!("clear range, start={}, end={}, len={}", start, end, len);
+
+            for id in ids.iter().take(len) {
+                println!("cancel id={}", id.0);
+                unsafe {
+                    // the co could be deleted, but we can sure that
+                    // the co would not be dropped since we hold guard
+                    let co = CoHandle::from(id.1);
+                    co.co.coroutine().cancel();
+                    forget(co);
+                }
+            }
+
+            end -= end.min(MAX_LEN);
+            start = end.max(MAX_LEN) - MAX_LEN;
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct Manager {
     id: AtomicUsize,
-    co_map: CoMap,
+    co_map: Arc<CoMap>,
 }
 
 impl Manager {
     pub fn new() -> Self {
         Manager {
             id: AtomicUsize::new(0),
-            co_map: Arc::new(Default::default()),
+            co_map: Arc::new(CoMap::new()),
         }
     }
 
@@ -45,7 +155,7 @@ impl Manager {
         // it does not matter if the co is already done here
         // this will just leave an entry in the map and eventually
         // will be dropped after all coroutines done
-        self.co_map.lock().insert(id, co);
+        self.co_map.insert(id, co);
     }
 
     /// add sub coroutine that not static
@@ -71,28 +181,20 @@ impl Manager {
         // it doesn't' matter if the co is already done here
         // this will just leave any entry in the map and eventually
         // will be dropped after all coroutines done
-        self.co_map.lock().insert(id, co);
+        self.co_map.insert(id, co);
     }
 }
 
 impl Drop for Manager {
     // when parent exit would call this drop
     fn drop(&mut self) {
-        // cancel all the sub coroutines
-        self.co_map.lock().values().for_each(|co| {
-            unsafe { co.coroutine().cancel() };
-            // we can't wait the sub coroutine here,
-            // because we may be in a Cancel panicking context
-            // co.wait()
-        });
-
+        println!("Drop manager");
         // the SubCo drop would remove itself from the map
         // we can't remove SubCo here for:
-        // 1. reduce contention
-        // 2. avoid dashmap dead lock when hold item reference
-        //    while other thread is removing the item
+        self.co_map.cancel_all(self.id.load(Ordering::Relaxed));
+
         if !std::thread::panicking() {
-            while !self.co_map.lock().is_empty() {
+            while !self.co_map.is_empty() {
                 coroutine::yield_now();
             }
         }
@@ -102,7 +204,7 @@ impl Drop for Manager {
 /// represent a managed sub coroutine
 pub struct SubCo {
     id: usize,
-    co_map: CoMap,
+    co_map: Arc<CoMap>,
 }
 
 impl Drop for SubCo {
@@ -110,10 +212,8 @@ impl Drop for SubCo {
     // if this is called due to a panic then it's not safe
     // to call the coroutine mutex lock to trigger another panic
     fn drop(&mut self) {
-        let mut map = self.co_map.lock();
-        if let Some(co) = map.remove(&self.id) {
-            drop(map);
-            co.join().ok();
+        if let Some(co) = self.co_map.remove(&self.id) {
+            co.join();
         }
     }
 }
