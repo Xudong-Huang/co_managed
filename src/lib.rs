@@ -5,47 +5,42 @@
 #[macro_use]
 extern crate may;
 use may::coroutine;
-use parking_lot::Mutex;
+use rcu_cell::RcuCell;
+use rcu_list::d_list::{Entry, LinkedList};
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-// CAUTION: we can't use coroutine mutex here because in the cancelled drop
-// lock the mutex would trigger another Cancel panic
-// a better solution would be use a lock free hashmap
-type CoMap = Arc<Mutex<BTreeMap<usize, coroutine::JoinHandle<()>>>>;
+type CoNode = Arc<RcuCell<coroutine::JoinHandle<()>>>;
+type CoList = Arc<LinkedList<CoNode>>;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Manager {
-    id: AtomicUsize,
-    co_map: CoMap,
+    co_list: CoList,
 }
 
 impl Manager {
     pub fn new() -> Self {
         Manager {
-            id: AtomicUsize::new(0),
-            co_map: Arc::new(Default::default()),
+            co_list: Arc::new(Default::default()),
         }
     }
 
     pub fn add<F>(&self, f: F)
     where
-        F: FnOnce(SubCo) + Send + 'static,
+        F: FnOnce() + Send + 'static,
     {
-        let id = self.id.fetch_add(1, Ordering::Relaxed);
-        let sub = SubCo {
-            id,
-            co_map: self.co_map.clone(),
-        };
+        let slot = Arc::new(RcuCell::none());
+        let slot_dup = slot.clone();
 
-        let co = go!(move || f(sub));
+        let co_list = self.co_list.clone();
 
-        // it does not matter if the co is already done here
-        // this will just leave an entry in the map and eventually
-        // will be dropped after all coroutines done
-        self.co_map.lock().insert(id, co);
+        let co = go!(move || {
+            let entry = co_list.push_front(slot_dup);
+            let _sub_co = SubCo { entry };
+            f();
+        });
+        // setup the JoinHandle
+        slot.write(co);
     }
 
     /// add sub coroutine that not static
@@ -55,23 +50,23 @@ impl Manager {
     /// the `SubCo` may not live long enough
     pub unsafe fn add_unsafe<'a, F>(&self, f: F)
     where
-        F: FnOnce(SubCo) + Send + 'a,
+        F: FnOnce() + Send + 'a,
     {
-        let id = self.id.fetch_add(1, Ordering::Relaxed);
-        let sub = SubCo {
-            id,
-            co_map: self.co_map.clone(),
-        };
+        let slot = Arc::new(RcuCell::none());
+        let slot_dup = slot.clone();
 
-        let closure: Box<dyn FnOnce(SubCo) + Send + 'a> = Box::new(f);
-        let closure: Box<dyn FnOnce(SubCo) + Send> = std::mem::transmute(closure);
+        let co_list = self.co_list.clone();
 
-        let co = go!(move || closure(sub));
+        let closure: Box<dyn FnOnce() + Send + 'a> = Box::new(f);
+        let closure: Box<dyn FnOnce() + Send> = std::mem::transmute(closure);
 
-        // it doesn't' matter if the co is already done here
-        // this will just leave any entry in the map and eventually
-        // will be dropped after all coroutines done
-        self.co_map.lock().insert(id, co);
+        let co = go!(move || {
+            let entry = co_list.push_front(slot_dup);
+            let _sub_co = SubCo { entry };
+            closure()
+        });
+        // setup the JoinHandle
+        slot.write(co);
     }
 }
 
@@ -79,42 +74,28 @@ impl Drop for Manager {
     // when parent exit would call this drop
     fn drop(&mut self) {
         // cancel all the sub coroutines
-        self.co_map.lock().values().for_each(|co| {
+        self.co_list.iter().for_each(|co| {
+            let co = co.read().unwrap();
             unsafe { co.coroutine().cancel() };
-            // we can't wait the sub coroutine here,
-            // because we may be in a Cancel panicking context
-            // co.wait()
+            co.wait()
         });
 
-        // the SubCo drop would remove itself from the map
-        // we can't remove SubCo here for:
-        // 1. reduce contention
-        // 2. avoid dashmap dead lock when hold item reference
-        //    while other thread is removing the item
-        if !std::thread::panicking() {
-            while !self.co_map.lock().is_empty() {
-                coroutine::yield_now();
-            }
+        // the SubCo drop would remove itself from the list
+        while !self.co_list.is_empty() {
+            coroutine::yield_now();
         }
     }
 }
 
 /// represent a managed sub coroutine
-pub struct SubCo {
-    id: usize,
-    co_map: CoMap,
+pub struct SubCo<'a> {
+    entry: Entry<'a, CoNode>,
 }
 
-impl Drop for SubCo {
+impl<'a> Drop for SubCo<'a> {
     // when the sub coroutine finished will trigger this drop
-    // if this is called due to a panic then it's not safe
-    // to call the coroutine mutex lock to trigger another panic
     fn drop(&mut self) {
-        let mut map = self.co_map.lock();
-        if let Some(co) = map.remove(&self.id) {
-            drop(map);
-            co.join().ok();
-        }
+        self.entry.remove();
     }
 }
 
@@ -133,7 +114,7 @@ mod tests {
             }
         }
         for i in 0..10 {
-            manager.add(move |_| {
+            manager.add(move || {
                 let d = Dummy(i);
                 println!("sub started, id = {}", d.0);
                 loop {
@@ -159,7 +140,7 @@ mod tests {
                 }
             }
             for i in 0..10 {
-                manager.add(move |_| {
+                manager.add(move || {
                     let d = Dummy(i);
                     println!("sub started, id = {}", d.0);
                     loop {
