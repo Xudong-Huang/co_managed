@@ -92,7 +92,7 @@ pub struct SubCo<'a> {
     entry: Entry<'a, CoNode>,
 }
 
-impl<'a> Drop for SubCo<'a> {
+impl Drop for SubCo<'_> {
     // when the sub coroutine finished will trigger this drop
     fn drop(&mut self) {
         self.entry.remove();
