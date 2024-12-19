@@ -34,7 +34,7 @@ fn main() {
             }
         }
         for i in 0..10 {
-            manager.add(move |_| {
+            manager.add(move || {
                 let d = Dummy(i);
                 println!("sub started, id = {}", d.0);
                 loop {

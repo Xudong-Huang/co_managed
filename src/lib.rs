@@ -2,6 +2,8 @@
 //! this is some like the scoped coroutine creation, the difference is that we manage the sub
 //! coroutines in a hash map, so that when sub coroutine exit the entry will be removed dynamically
 //! and parent doesn't wait it's children exit
+
+#![doc = include_str!("../README.md")]
 #[macro_use]
 extern crate may;
 use may::coroutine;
