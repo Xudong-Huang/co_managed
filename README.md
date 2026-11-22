@@ -26,7 +26,7 @@ Add the dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-co_managed = "0.2"
+co_managed = "0.3"
 ```
 
 Then spawn managed sub coroutines from a `may` coroutine:
