@@ -16,6 +16,8 @@ use may::coroutine;
 use rcu_list::d_list::{LinkedList, StaticEntry};
 use rcu_list::rcu_cell::RcuCell;
 
+use std::time::{Duration, Instant};
+
 type CoNode = RcuCell<coroutine::JoinHandle<()>>;
 type CoList = LinkedList<CoNode>;
 
@@ -114,10 +116,7 @@ impl Manager {
         // Register the sub coroutine before spawning it. If we registered it
         // from inside the coroutine instead, a manager dropped right after
         // `add` could observe an empty list and leak the child.
-        let entry = self
-            .co_list
-            .push_front(RcuCell::none())
-            .into_static();
+        let entry = self.co_list.push_front(RcuCell::none()).into_static();
         let child_entry = entry.clone();
 
         let co = unsafe {
@@ -180,10 +179,7 @@ impl Manager {
         let closure: Box<dyn FnOnce() + Send> = std::mem::transmute(closure);
 
         // Register before spawning for the same reason as `add`.
-        let entry = self
-            .co_list
-            .push_front(RcuCell::none())
-            .into_static();
+        let entry = self.co_list.push_front(RcuCell::none()).into_static();
         let child_entry = entry.clone();
 
         let co = unsafe {
@@ -221,9 +217,36 @@ impl Drop for Manager {
             co.wait()
         });
 
-        // the SubCo drop would remove itself from the list
+        // Every child has been joined above, so its SubCo guard has run and
+        // unlinked the entry; anything still in the list is transient. Yield
+        // for a bit to let the removals land, then fall back to sleeping, and
+        // warn periodically in case an entry never disappears.
+        const SPIN_RETRIES: u32 = 1000;
+        const SLEEP_INTERVAL: Duration = Duration::from_millis(1);
+        const WARN_INTERVAL: Duration = Duration::from_secs(2);
+
+        let start = Instant::now();
+        let mut last_warn = start;
+        let mut retries = 0;
+
         while !self.co_list.is_empty() {
-            coroutine::yield_now();
+            if retries < SPIN_RETRIES {
+                coroutine::yield_now();
+                retries += 1;
+            } else {
+                coroutine::sleep(SLEEP_INTERVAL);
+            }
+
+            let now = Instant::now();
+            if now.duration_since(last_warn) >= WARN_INTERVAL {
+                last_warn = now;
+                eprintln!(
+                    "co_managed: warning: manager teardown has been waiting for {} sub \
+                     coroutine(s) to unregister for {:?}",
+                    self.co_list.iter().count(),
+                    now.duration_since(start),
+                );
+            }
         }
     }
 }
