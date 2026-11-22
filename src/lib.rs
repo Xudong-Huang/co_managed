@@ -12,10 +12,8 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
-#[macro_use]
-extern crate may;
 use may::coroutine;
-use rcu_list::d_list::{Entry, LinkedList};
+use rcu_list::d_list::{LinkedList, StaticEntry};
 use rcu_list::rcu_cell::RcuCell;
 
 use std::sync::Arc;
@@ -29,8 +27,8 @@ type CoList = Arc<LinkedList<CoNode>>;
 /// [`add_unsafe`](Manager::add_unsafe) is tracked by the manager until it
 /// finishes. Tracking is dynamic: a coroutine that exits removes itself, so a
 /// long-lived manager does not accumulate finished coroutines. Sub coroutines
-/// are tracked in a lock-free list, so `add` may be called concurrently from
-/// several coroutines.
+/// are tracked in a concurrent RCU linked list whose writers take a per-node
+/// lock, so `add` may be called concurrently from several coroutines.
 ///
 /// Dropping the manager cancels every coroutine that is still running and
 /// blocks until all of them have finished. This ties the lifetime of the child
@@ -64,7 +62,7 @@ impl Manager {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// use co_managed::Manager;
     ///
     /// let manager = Manager::new();
@@ -81,17 +79,22 @@ impl Manager {
     /// Spawns `f` as a new managed sub coroutine.
     ///
     /// The closure runs on a new `may` coroutine. It is registered with this
-    /// manager before it starts, even if it returns immediately. When `f`
-    /// returns, panics, or is cancelled, the sub coroutine removes itself from
-    /// the manager.
+    /// manager before the coroutine is spawned, so once `add` returns the
+    /// manager is guaranteed to track it; dropping the manager immediately
+    /// afterwards still cancels the sub coroutine. When `f` returns, panics, or
+    /// is cancelled, the sub coroutine removes itself from the manager.
     ///
     /// This method returns immediately and does not wait for `f`. The sub
     /// coroutine runs until it finishes on its own or until the manager is
     /// dropped, at which point it is cancelled.
     ///
+    /// # Panics
+    ///
+    /// Panics if the coroutine cannot be spawned.
+    ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// use co_managed::Manager;
     /// use may::coroutine;
     /// use std::time::Duration;
@@ -102,7 +105,8 @@ impl Manager {
     ///     coroutine::sleep(Duration::from_millis(100));
     /// });
     ///
-    /// // Dropping the manager cancels and joins the sub coroutine above.
+    /// // The child was registered before `add` returned, so dropping the
+    /// // manager here cancels and joins it.
     /// drop(manager);
     /// ```
     pub fn add<F>(&self, f: F)
@@ -112,15 +116,30 @@ impl Manager {
         let slot = Arc::new(RcuCell::none());
         let slot_dup = slot.clone();
 
-        let co_list = self.co_list.clone();
+        // Register the sub coroutine before spawning it. If we registered it
+        // from inside the coroutine instead, a manager dropped right after
+        // `add` could observe an empty list and leak the child.
+        let entry = self.co_list.push_front(slot).into_static();
+        let child_entry = entry.clone();
 
-        let co = go!(move || {
-            let entry = co_list.push_front(slot_dup);
-            let _sub_co = SubCo { entry };
-            f();
-        });
-        // setup the JoinHandle
-        slot.write(co);
+        let co = unsafe {
+            coroutine::Builder::new().spawn(move || {
+                let _sub_co = SubCo { entry: child_entry };
+                f();
+            })
+        };
+
+        match co {
+            // setup the JoinHandle
+            Ok(co) => {
+                slot_dup.write(co);
+            }
+            Err(err) => {
+                // no coroutine was started, so drop the registration
+                entry.remove();
+                panic!("failed to spawn sub coroutine: {err}");
+            }
+        }
     }
 
     /// Spawns `f` as a managed sub coroutine, allowing it to borrow data that
@@ -151,6 +170,10 @@ impl Manager {
     ///
     /// Violating these requirements lets the sub coroutine access dangling
     /// references, which is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the coroutine cannot be spawned.
     pub unsafe fn add_unsafe<'a, F>(&self, f: F)
     where
         F: FnOnce() + Send + 'a,
@@ -158,24 +181,41 @@ impl Manager {
         let slot = Arc::new(RcuCell::none());
         let slot_dup = slot.clone();
 
-        let co_list = self.co_list.clone();
-
         let closure: Box<dyn FnOnce() + Send + 'a> = Box::new(f);
         let closure: Box<dyn FnOnce() + Send> = std::mem::transmute(closure);
 
-        let co = go!(move || {
-            let entry = co_list.push_front(slot_dup);
-            let _sub_co = SubCo { entry };
-            closure()
-        });
-        // setup the JoinHandle
-        slot.write(co);
+        // Register before spawning for the same reason as `add`.
+        let entry = self.co_list.push_front(slot).into_static();
+        let child_entry = entry.clone();
+
+        let co = unsafe {
+            coroutine::Builder::new().spawn(move || {
+                let _sub_co = SubCo { entry: child_entry };
+                closure()
+            })
+        };
+
+        match co {
+            // setup the JoinHandle
+            Ok(co) => {
+                slot_dup.write(co);
+            }
+            Err(err) => {
+                // no coroutine was started, so drop the registration
+                entry.remove();
+                panic!("failed to spawn sub coroutine: {err}");
+            }
+        }
     }
 }
 
 impl Drop for Manager {
     // when parent exit would call this drop
     fn drop(&mut self) {
+        // Every child is registered before `add` returns, and the manager
+        // cannot be dropped while an `add` borrow is outstanding, so the list
+        // is complete here and no new entries can appear during teardown.
+
         // cancel all the sub coroutines
         self.co_list.iter().for_each(|co| {
             let co = co.read().unwrap();
@@ -200,11 +240,11 @@ impl Drop for Manager {
 ///
 /// Values of this type are created by the crate and cannot be constructed
 /// directly.
-pub struct SubCo<'a> {
-    entry: Entry<'a, CoNode>,
+pub struct SubCo {
+    entry: StaticEntry<CoNode>,
 }
 
-impl Drop for SubCo<'_> {
+impl Drop for SubCo {
     // when the sub coroutine finished will trigger this drop
     fn drop(&mut self) {
         self.entry.remove();
@@ -214,7 +254,65 @@ impl Drop for SubCo<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use may::go;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    /// Dropping a manager immediately after `add` must still cancel the child,
+    /// even if the spawned coroutine has not started yet.
+    #[test]
+    fn drop_immediately_after_add_cancels_child() {
+        for _ in 0..100 {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let flag = dropped.clone();
+
+            let manager = Manager::new();
+            manager.add(move || {
+                struct Guard(Arc<AtomicBool>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _guard = Guard(flag);
+                loop {
+                    coroutine::sleep(Duration::from_millis(1));
+                }
+            });
+
+            drop(manager);
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "child was not cancelled by drop"
+            );
+        }
+    }
+
+    /// Teardown must cancel every child even when many are added in a burst.
+    #[test]
+    fn drop_cancels_many_children() {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let manager = Manager::new();
+
+        for _ in 0..100 {
+            let counter = dropped.clone();
+            manager.add(move || {
+                struct Guard(Arc<AtomicUsize>);
+                impl Drop for Guard {
+                    fn drop(&mut self) {
+                        self.0.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                let _guard = Guard(counter);
+                loop {
+                    coroutine::sleep(Duration::from_millis(1));
+                }
+            });
+        }
+
+        drop(manager);
+        assert_eq!(dropped.load(Ordering::SeqCst), 100);
+    }
 
     #[test]
     fn thread_exit() {

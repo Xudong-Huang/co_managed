@@ -12,9 +12,9 @@ A `Manager` owns a dynamic set of child coroutines:
 - **No waiting while running.** Unlike a scoped spawn, the parent does not wait
   for its children; children are only awaited during teardown.
 
-Children are tracked in a lock-free RCU linked list, so `add` can be called
-concurrently from several coroutines and finished children unlink themselves
-without taking a global lock.
+Children are tracked in a concurrent RCU linked list whose writers take a
+per-node lock, so `add` can be called concurrently from several coroutines and
+finished children unlink themselves without a global lock.
 
 [![Build Status](https://github.com/Xudong-Huang/co_managed/workflows/CI/badge.svg)](https://github.com/Xudong-Huang/co_managed/actions?query=workflow%3ACI)
 [![Current Crates.io Version](https://img.shields.io/crates/v/co_managed.svg)](https://crates.io/crates/co_managed)
@@ -75,7 +75,8 @@ fn main() {
 }
 ```
 
-A runnable version lives in [`examples/main.rs`](examples/main.rs):
+A runnable version lives in
+[`examples/main.rs`](https://github.com/Xudong-Huang/co_managed/blob/master/examples/main.rs):
 
 ```sh
 cargo run --example main
@@ -83,10 +84,11 @@ cargo run --example main
 
 ## How it works
 
-`Manager::add` spawns a coroutine with `may::go!`. Before the supplied closure
-runs, the coroutine inserts a slot into the manager's RCU linked list and
-creates a `SubCo` guard. The guard removes the slot when the closure returns or
-unwinds, so the list always contains only the coroutines that are still alive.
+`Manager::add` first inserts a slot into the manager's RCU linked list, then
+spawns a coroutine with `may`. Registering before spawning means a manager
+dropped immediately after `add` still sees and cancels the child. The spawned
+coroutine owns a `SubCo` guard that removes the slot when the closure returns
+or unwinds, so the list contains only the coroutines that are still alive.
 Dropping the `Manager` walks the list, cancels each coroutine, waits for it to
 finish, and yields until the list is empty.
 
