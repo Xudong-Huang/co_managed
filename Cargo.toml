@@ -4,7 +4,6 @@ version = "0.2.1"
 edition = "2021"
 authors = ["Xudong Huang <huangxu008@hotmail.com>"]
 repository = "https://github.com/Xudong-Huang/co_managed.git"
-homepage = "https://github.com/Xudong-Huang/co_managed.git"
 documentation = "https://docs.rs/co_managed"
 description = "Create managed sub coroutines. Managed sub coroutines will be cancelled when the parent exit"
 readme = "README.md"
@@ -14,5 +13,4 @@ license = "MIT/Apache-2.0"
 
 [dependencies]
 may = "0.3"
-rcu_cell = "1"
-rcu_list = "0.1"
+rcu_list = "0.2.3"
