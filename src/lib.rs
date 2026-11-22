@@ -16,10 +16,8 @@ use may::coroutine;
 use rcu_list::d_list::{LinkedList, StaticEntry};
 use rcu_list::rcu_cell::RcuCell;
 
-use std::sync::Arc;
-
-type CoNode = Arc<RcuCell<coroutine::JoinHandle<()>>>;
-type CoList = Arc<LinkedList<CoNode>>;
+type CoNode = RcuCell<coroutine::JoinHandle<()>>;
+type CoList = LinkedList<CoNode>;
 
 /// A collection of managed sub coroutines.
 ///
@@ -72,7 +70,7 @@ impl Manager {
     /// ```
     pub fn new() -> Self {
         Manager {
-            co_list: Arc::new(Default::default()),
+            co_list: Default::default(),
         }
     }
 
@@ -113,13 +111,13 @@ impl Manager {
     where
         F: FnOnce() + Send + 'static,
     {
-        let slot = Arc::new(RcuCell::none());
-        let slot_dup = slot.clone();
-
         // Register the sub coroutine before spawning it. If we registered it
         // from inside the coroutine instead, a manager dropped right after
         // `add` could observe an empty list and leak the child.
-        let entry = self.co_list.push_front(slot).into_static();
+        let entry = self
+            .co_list
+            .push_front(RcuCell::none())
+            .into_static();
         let child_entry = entry.clone();
 
         let co = unsafe {
@@ -132,7 +130,7 @@ impl Manager {
         match co {
             // setup the JoinHandle
             Ok(co) => {
-                slot_dup.write(co);
+                entry.write(co);
             }
             Err(err) => {
                 // no coroutine was started, so drop the registration
@@ -178,14 +176,14 @@ impl Manager {
     where
         F: FnOnce() + Send + 'a,
     {
-        let slot = Arc::new(RcuCell::none());
-        let slot_dup = slot.clone();
-
         let closure: Box<dyn FnOnce() + Send + 'a> = Box::new(f);
         let closure: Box<dyn FnOnce() + Send> = std::mem::transmute(closure);
 
         // Register before spawning for the same reason as `add`.
-        let entry = self.co_list.push_front(slot).into_static();
+        let entry = self
+            .co_list
+            .push_front(RcuCell::none())
+            .into_static();
         let child_entry = entry.clone();
 
         let co = unsafe {
@@ -198,7 +196,7 @@ impl Manager {
         match co {
             // setup the JoinHandle
             Ok(co) => {
-                slot_dup.write(co);
+                entry.write(co);
             }
             Err(err) => {
                 // no coroutine was started, so drop the registration
@@ -256,6 +254,7 @@ mod tests {
     use super::*;
     use may::go;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     /// Dropping a manager immediately after `add` must still cancel the child,
