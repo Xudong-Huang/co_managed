@@ -210,12 +210,18 @@ impl Drop for Manager {
         // cannot be dropped while an `add` borrow is outstanding, so the list
         // is complete here and no new entries can appear during teardown.
 
-        // cancel all the sub coroutines
+        let mut sub_coroutines = Vec::new();
+        // Cancel every child before waiting for any of them to finish.
         self.co_list.iter().for_each(|co| {
             let co = co.read().unwrap();
             unsafe { co.coroutine().cancel() };
-            co.wait()
+            sub_coroutines.push(co);
         });
+
+        // Wait for all children to finish after sending cancellation.
+        for co in sub_coroutines {
+            co.wait();
+        }
 
         // Every child has been joined above, so its SubCo guard has run and
         // unlinked the entry; anything still in the list is transient. Yield
@@ -385,8 +391,7 @@ mod tests {
 
         coroutine::sleep(Duration::from_millis(100));
         unsafe { j.coroutine().cancel() };
-        j.join().ok();
+        j.wait();
         println!("parent exit");
-        coroutine::sleep(Duration::from_millis(1000));
     }
 }
